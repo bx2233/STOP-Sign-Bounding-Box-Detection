@@ -1,6 +1,5 @@
 README.txt
 Author: Beibei Xian 
-Uni:bx2233
 
 This file describes the parameters used in the cv2.kmeans() function inside my get_box() function, explains why I chose the values I did, and lists some cases where the algorithm might fail.
 
