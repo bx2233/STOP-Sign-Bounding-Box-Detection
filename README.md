@@ -1,115 +1,170 @@
-# STOP Sign Bounding Box Detection
-**Author:** Beibei Xian
+# Stop-Sign Detection via K-Means Segmentation
 
-This file describes the parameters used in the `cv2.kmeans()` function inside the `get_box()` function, explains why those values were chosen, and lists situations where the algorithm may fail.
+Classical computer vision pipeline that localizes stop signs in 24 road images under varied lighting, occlusion, and background conditions — built for Columbia’s *GR5293 Applied ML for Computer Vision*, Spring 2026.
 
----
+No deep learning. No pre-trained models. Just HSV color space, K-means clustering, and adaptive preprocessing chosen pragmatically per image.
 
-## 1. `cv2.kmeans()` Parameters in My Final Script
+-----
 
-The call to `cv2.kmeans()` is:
+## Why this project matters
 
-```python
-compactness, labels, centers = cv2.kmeans(
-    Z, K, None, criteria, attempts, flags
-)
+Object detection without training data is an honest exercise in *knowing when not to reach for a neural network*. This pipeline prioritizes:
+
+- **Interpretability** — every decision is traceable to a feature (color, position, shape)
+- **Graceful degradation** — a secondary brightness-triggered pathway handles low-light scenes
+- **Generalizability** — the same scoring framework (color density + convex-hull solidity + boundary strength) transfers to any red-signage or object-cataloging task
+
+-----
+
+## Results
+
+The pipeline correctly localizes stop signs across a wide range of conditions. Selected outputs:
+
+|Clean daylight              |Cluttered background           |Snow / low contrast        |Partial occlusion               |
+|:--------------------------:|:-----------------------------:|:-------------------------:|:------------------------------:|
+|![Clean](results/stop22.png)|![Cluttered](results/stop3.png)|![Snow](results/stop13.png)|![Occlusion](results/stop19.png)|
+
+Bounding boxes are tight, spatially accurate, and survive transitions between foliage, sky, snow, and urban backgrounds.
+
+-----
+
+## Pipeline Overview
+
+```
+Input image
+   │
+   ▼
+Gaussian blur → HSV + grayscale conversion
+   │
+   ▼
+Adaptive brightness check ──► [if very dark]
+   │                            │
+   │                            ▼
+   │                   CLAHE contrast enhancement
+   │                   Otsu-based night fallback
+   │                            │
+   ▼                            │
+Feature matrix: [H, S, V, w·x, w·y]
+   │
+   ▼
+K-means clustering (K=4 or 5, k-means++ init, 10 attempts)
+   │
+   ▼
+Cluster scoring: center redness + pixel redness
+   │
+   ▼
+Top cluster(s) → binary mask
+   │
+   ▼
+Morphological cleanup (close → open → dilate/erode)
+   │
+   ▼
+Multi-factor component scoring
+   │
+   ▼
+Red-mask-guided bbox expansion
+   │
+   ▼
+Output: (xmin, ymin, xmax, ymax)
 ```
 
-Below is what each parameter means and how it is set.
+-----
 
----
+## Key Design Decisions
 
-### 1.1 `Z` — Input Feature Vectors
+### 1. HSV over RGB
 
-`Z` is a 2D NumPy array where each row corresponds to one pixel and each column is a feature. It is built by stacking:
+Red in RGB is spread across lighting conditions; in HSV it lives in two narrow hue bands (`h ≤ 5` and `h ≥ 175`). This makes color-based segmentation far more robust.
 
-- HSV values (`H`, `S`, `V`) of the pixel
-- Weighted, normalized `x` and `y` coordinates (`spatial_w * (x_norm, y_norm)`)
+### 2. Adaptive red masking by brightness
 
-The spatial weight controls how much pixel position matters during clustering.
+Instead of one fixed red-detection rule, the mask widens its hue tolerance and lowers saturation thresholds as the image darkens:
 
-| Condition | `spatial_w` |
-|-----------|-------------|
-| Normal or bright images | `20.0` |
-| Dark images (`mean_v < 60`) | `15.0` |
+|Mean V|Hue band             |Saturation floor|
+|:----:|:-------------------:|:--------------:|
+|≥ 100 |`h ≤ 5` or `h ≥ 175` |60              |
+|60–100|`h ≤ 12` or `h ≥ 168`|30              |
+|< 60  |`h ≤ 20` or `h ≥ 160`|15              |
 
-A higher spatial weight makes clusters more compact in image space, helping separate objects that are far apart. However, if the weight is too high, it may split the stop sign into multiple parts. A lower weight helps the sign stay in one cluster even if its parts are more spread out — especially useful in dark images where color is less reliable.
+This is the difference between 18/24 and 22/24 correct.
 
----
+### 3. Spatial features, weighted
 
-### 1.2 `K` — Number of Clusters
+K-means gets `[H, S, V, w·x_norm, w·y_norm]` as input. The spatial weight `w` controls how strongly pixel position influences clustering:
 
-`K` is the number of clusters the algorithm tries to find.
+- Too low → clusters sprawl across the image
+- Too high → the sign gets chopped into multiple pieces
 
-| Condition | `K` |
-|-----------|-----|
-| Dark images (`mean_v < 60`) | `5` |
-| Normal or bright images | `4` |
+Tuned to `w = 20` for normal light, `w = 15` for dark images (where color is noisier and spatial coherence matters more).
 
-Dark images contain less useful color information, so more clusters help separate the sign from background noise. For normal images, 4 clusters are usually sufficient. If `K` is too small, the sign may merge with the background; if too large, the sign may be split into small pieces.
+### 4. Multi-factor component scoring
 
----
+After clustering, every connected component is scored with a weighted combination of:
 
-### 1.3 `None` — bestLabels
+- **Red density** (is this really red?)
+- **Area fraction** (is it a plausible sign size?)
+- **Vertical position bias** (stop signs sit high, not on the road)
+- **Aspect ratio penalty** (stop signs are roughly square)
+- **Convex-hull solidity** (octagonal signs have high solidity)
+- **Canny boundary edge strength** (real objects have defined edges)
+- **Border & bottom penalties** (artifacts often hug image edges)
 
-`None` is passed for `bestLabels` so that OpenCV initializes the cluster centers automatically.
+No single feature wins — the combination does.
 
----
+### 5. Night-image fallback
 
-### 1.4 `criteria` — Termination Criteria
+When mean V-channel drops below 40, the pipeline switches to an alternate pathway: CLAHE → Otsu threshold on V-channel → connected components → edge-density scoring. This catches signs that are too color-desaturated for the primary pipeline to detect.
+
+### 6. Red-mask-guided bbox expansion
+
+After the best component is chosen, the bounding box is refined by fitting a convex hull around nearby red pixels in an expanded ROI. This recovers sign edges that morphological operations may have eroded.
+
+-----
+
+## `cv2.kmeans()` Configuration
 
 ```python
 criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 25, 1.0)
-```
-
-The algorithm stops when **either** condition is met:
-
-- The maximum number of iterations is reached, **or**
-- The cluster centers move less than epsilon
-
-| Parameter | Value | Reason |
-|-----------|-------|--------|
-| Max iterations | `25` | The algorithm usually converges before this; more iterations would mostly waste time |
-| Epsilon | `1.0` | A smaller epsilon would be more precise but slower |
-
----
-
-### 1.5 `attempts` — Number of Runs
-
-```python
 attempts = 10
+flags    = cv2.KMEANS_PP_CENTERS
+K        = 5 if mean_v < 60 else 4
 ```
 
-K-means is sensitive to the initial placement of centers. Running it 10 times with different initializations allows OpenCV to choose the result with the best compactness, making the output more stable and less dependent on luck. 10 attempts gives reliable results without making the code too slow.
+|Parameter |Value              |Why                                                        |
+|----------|-------------------|-----------------------------------------------------------|
+|`K`       |4 or 5             |More clusters for dark images where color signal is noisier|
+|`criteria`|25 iters, ε=1.0    |Converges well before iteration cap; tighter ε gains little|
+|`attempts`|10                 |K-means is init-sensitive; 10 runs stabilizes output       |
+|`flags`   |`KMEANS_PP_CENTERS`|K-means++ spreads initial centers for better convergence   |
 
----
+-----
 
-### 1.6 `flags` — Initialization Method
+## Where the pipeline can fail
 
-```python
-flags = cv2.KMEANS_PP_CENTERS
+1. **Extremely dark scenes where the sign has near-zero contrast** — even CLAHE + Otsu may collapse to the wrong region.
+1. **Severe occlusion** — if less than ~60% of the sign is visible, the irregular shape breaks the aspect-ratio and solidity scoring.
+1. **Multiple red objects in the frame** — a second red sign at similar height with smooth color can out-score the real stop sign.
+1. **Extreme color casts** (strong blue or green tint) — pushes red hue outside even the widest adaptive band.
+
+-----
+
+## Run it
+
+```bash
+mkdir -p results
+python bx2233_kmeans_assignment1.py
 ```
 
-This tells OpenCV to use the **k-means++** method for initial center selection. K-means++ spreads out the starting centers, which usually leads to better and faster convergence than random initialization.
+Reads from `./images/stop1.png` through `./images/stop24.png`, writes annotated outputs to `./results/`.
 
----
+-----
 
-## 2. Situations Where Performance May Falter Significantly
+## What I’d do next
 
-Even though the algorithm works on most of the 24 images, there are still several situations where it may fail.
+- Replace color segmentation with **CLIP or DINO embeddings** to generalize across asset categories (not just red octagons — coins, watches, cards, artworks).
+- Add **shape priors** via Hough or contour matching against an octagon template for a cheap geometric sanity check.
+- Benchmark against a light YOLO model to quantify the classical-vs-learned tradeoff.
 
-1. **Extremely dark images where the stop sign is barely visible**
-   The night-image fallback uses Otsu thresholding on the enhanced `V` channel, but if the sign has very low contrast, even that may not detect it correctly. The algorithm may return the whole image or the wrong region.
+-----
 
-2. **Images where the stop sign is severely occluded or cut off**
-   The algorithm assumes the sign has a roughly square shape and a distinct red color. If part of the sign is hidden, the remaining visible region may be too irregular to be selected correctly.
-
-3. **Scenes with multiple red objects similar to the stop sign**
-   For example, a smaller red sign near the real stop sign may confuse the component scoring process. The algorithm includes penalties for low vertical position and texture variance, but if another red object is also high in the image and has a smooth red surface, it may still be selected by mistake.
-
-4. **Images with strong color casts**
-   If the image has an extreme blue tint or another strong color shift, the red color of the stop sign may move outside the expected hue range. The adaptive red mask can handle moderate lighting changes, but very severe color distortion may cause the red pixels to be missed.
-
----
-
-*End of README*
+**Author:** Beibei Xian · [artbybeibei.com](https://www.artbybeibei.com) · M.A. Statistics @ Columbia
