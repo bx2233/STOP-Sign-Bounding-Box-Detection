@@ -22,7 +22,7 @@ The pipeline correctly localizes stop signs across a wide range of conditions. S
 
 |Clean daylight              |Cluttered background           |Snow / low contrast        |Partial occlusion               |
 |:--------------------------:|:-----------------------------:|:-------------------------:|:------------------------------:|
-|![Clean](stop22.png)|![Cluttered](stop3.png)|![Snow](stop13.png)|![Occlusion](stop19.png)|
+|![Clean](stop22.png)|![Cluttered](stop3.png)|![Snow](stop13.png)|![Occlusion](stop8.png)|
 
 Bounding boxes are tight, spatially accurate, and survive transitions between foliage, sky, snow, and urban backgrounds.
 
